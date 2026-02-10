@@ -1,0 +1,127 @@
+version: 2.1
+
+executors:
+  py_executor:
+    docker:
+      - image: cimg/python:3.12.6
+    working_directory: ~/repo
+
+orbs:
+  aws-ecr: circleci/aws-ecr@6.8.2
+
+commands:
+  init_env:
+    steps:
+      - run:
+          name: Initialize environment variable
+          command: |
+            echo 'export GIT_HASH=$(echo ${CIRCLE_SHA1:0:11})' >> $BASH_ENV
+            echo 'export DOCKER_BUILDKIT=1' >> $BASH_ENV
+            source $BASH_ENV
+            echo "GIT_HASH=${GIT_HASH}"
+            
+jobs:
+  build_image:
+    description: "Build the docker image"
+    parameters:
+      aws-ecr-url:
+        type: env_var_name
+        default: AWS_ECR_URL
+      aws-ecr-namespace:
+        type: string
+        default: ${AWS_ECR_NAMESPACE}
+      aws-ecr-image-name:
+        type: string
+        default: ${CIRCLE_PROJECT_REPONAME}  
+    executor: py_executor
+    steps:
+      - checkout
+      - init_env
+      - setup_remote_docker:
+          version: 20.10.24
+      - aws-ecr/build-image:
+          account-url: << parameters.aws-ecr-url >>
+          repo: '<< parameters.aws-ecr-namespace >>/<< parameters.aws-ecr-image-name >>'
+          tag: 'latest,${GIT_HASH}'
+          extra-build-args: '--build-arg SERVICE_NAME=<< parameters.aws-ecr-image-name >> --ssh default'
+
+  build_push_image:
+    description: "Build the docker image and Publish"
+    parameters:
+      aws-access-key:
+        type: env_var_name
+        default: AWS_ACCESS_KEY_ID
+      aws-secret-key:
+        type: env_var_name
+        default: AWS_SECRET_ACCESS_KEY
+      aws-region:
+        type: env_var_name
+        default: GLOBAL_AWS_REGION
+      aws-ecr-url:
+        type: env_var_name
+        default: AWS_ECR_URL
+      aws-ecr-namespace:
+        type: string
+        default: ${AWS_ECR_NAMESPACE}
+      aws-ecr-image-name:
+        type: string
+        default: ${CIRCLE_PROJECT_REPONAME}
+    executor: py_executor
+    steps:
+      - checkout
+      - init_env
+      - setup_remote_docker:
+          version: 20.10.24
+      - aws-ecr/build-and-push-image:
+          aws-access-key-id: << parameters.aws-access-key >>
+          aws-secret-access-key: << parameters.aws-secret-key >>
+          create-repo: true
+          account-url: << parameters.aws-ecr-url >>
+          region: << parameters.aws-region >>
+          repo: '<< parameters.aws-ecr-namespace >>/<< parameters.aws-ecr-image-name >>'
+          tag: 'latest,${GIT_HASH}'
+          extra-build-args: '--build-arg SERVICE_NAME=<< parameters.aws-ecr-image-name >> --ssh default'
+
+workflows:
+  version: 2.1
+  build:
+    jobs:
+      - build_push_image:
+          context: ers-rfsencap-ci
+          filters:
+            branches:
+              ignore: /main|qa|ea|release/   
+
+      - build_push_image:
+          context: ers-rfsencap-ci
+          filters:
+            branches:
+              only: /main/
+    
+      - build_push_image:
+          context: ers-rafa-qa
+          filters:
+            branches:
+              only: /qa/
+    
+      - approve_build_n_deployment:
+          type: approval
+          filters:
+            branches:
+              only: /ea|release/
+
+      - build_push_image:
+          context: ers-rfsencap-ea
+          requires:
+            - approve_build_n_deployment
+          filters:
+            branches:
+              only: ea
+    
+      - build_push_image:
+          context: ers-rafa-prd
+          requires:
+            - approve_build_n_deployment
+          filters:
+            branches:
+              only: release
